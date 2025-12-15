@@ -1,0 +1,103 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Planio</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 14px; }
+    input, button { padding: 10px; margin: 6px 0; width: 100%; box-sizing: border-box; }
+    .row { display:flex; gap:10px; }
+    .row > * { flex: 1; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px; margin: 10px 0; }
+    .muted { color:#666; font-size: 12px; }
+    button { cursor:pointer; }
+  </style>
+</head>
+<body>
+  <h1>Planio</h1>
+  <p class="muted">Serverless Task Management (AWS Free Tier friendly)</p>
+
+  <label>API Base URL (from CloudFormation output)</label>
+  <input id="api" placeholder="https://xxxx.execute-api.region.amazonaws.com/prod" />
+
+  <h3>Create Task</h3>
+  <div class="row">
+    <input id="title" placeholder="Title (required)" />
+    <input id="desc" placeholder="Description (optional)" />
+  </div>
+  <button onclick="createTask()">Add Task</button>
+
+  <h3>Your Tasks</h3>
+  <button onclick="loadTasks()">Refresh</button>
+  <div id="list"></div>
+
+<script>
+async function createTask() {
+  const api = document.getElementById("api").value.trim();
+  const title = document.getElementById("title").value.trim();
+  const description = document.getElementById("desc").value.trim();
+  if (!api || !title) return alert("API Base URL and title are required.");
+
+  await fetch(api + "/tasks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title, description })
+  });
+
+  document.getElementById("title").value = "";
+  document.getElementById("desc").value = "";
+  await loadTasks();
+}
+
+async function loadTasks() {
+  const api = document.getElementById("api").value.trim();
+  if (!api) return alert("API Base URL is required.");
+
+  const res = await fetch(api + "/tasks");
+  const data = await res.json();
+
+  const list = document.getElementById("list");
+  list.innerHTML = "";
+
+  (data.items || []).forEach(t => {
+    const div = document.createElement("div");
+    div.className = "card";
+    div.innerHTML = `
+      <b>${escapeHtml(t.title)}</b>
+      <div class="muted">${t.taskId}</div>
+      <div>${escapeHtml(t.description || "")}</div>
+      <div class="muted">Status: ${t.status} • Created: ${t.createdAt}</div>
+      <div class="row">
+        <button onclick="markDone('${t.taskId}')">Mark DONE</button>
+        <button onclick="delTask('${t.taskId}')">Delete</button>
+      </div>
+    `;
+    list.appendChild(div);
+  });
+}
+
+async function markDone(id) {
+  const api = document.getElementById("api").value.trim();
+  await fetch(api + "/tasks/" + id, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status: "DONE" })
+  });
+  await loadTasks();
+}
+
+async function delTask(id) {
+  const api = document.getElementById("api").value.trim();
+  await fetch(api + "/tasks/" + id, { method: "DELETE" });
+  await loadTasks();
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, s => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"
+  }[s]));
+}
+</script>
+</body>
+</html>

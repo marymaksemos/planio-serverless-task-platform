@@ -1,0 +1,329 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Planio - Serverless Task Management (HTTP API + Lambda + DynamoDB) - Console/FreeTier 
+
+Parameters:
+  AppName:
+    Type: String
+    Default: Planio
+  TableName:
+    Type: String
+    Default: PlanioTasks
+  StageName:
+    Type: String
+    Default: prod
+
+Resources:
+  # 1) DynamoDB Table
+  TasksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref TableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: taskId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: taskId
+          KeyType: HASH
+
+  # 2) IAM Role for Lambda (logs + DynamoDB CRUD)
+  PlanioLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AppName}LambdaRole-${AWS::StackName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: PlanioLambdaBasicAndDynamoCrud
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # CloudWatch Logs
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+              # DynamoDB CRUD on the created table only
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Scan
+                Resource: !GetAtt TasksTable.Arn
+
+  # 3) Lambda Function (Python inline - boto3 included)
+  PlanioFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${AppName}Handler-${AWS::StackName}"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt PlanioLambdaRole.Arn
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TableName
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import boto3
+          import uuid
+          from datetime import datetime, timezone
+          from botocore.exceptions import ClientError
+
+          # --- Setup ---
+          TABLE_NAME = os.environ.get("TABLE_NAME")
+          if not TABLE_NAME:
+              # Fail early with a clear message in logs
+              raise Exception("Missing environment variable TABLE_NAME")
+
+          ddb = boto3.resource("dynamodb")
+          table = ddb.Table(TABLE_NAME)
+
+          # --- Helpers ---
+          def resp(status, body=None):
+              return {
+                  "statusCode": status,
+                  "headers": {
+                      "Content-Type": "application/json",
+                      "Access-Control-Allow-Origin": "*",
+                      "Access-Control-Allow-Headers": "*",
+                      "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS"
+                  },
+                  "body": "" if body is None else json.dumps(body)
+              }
+
+          def normalize_path(event):
+              # HTTP API sometimes includes stage prefix in rawPath: /prod/tasks
+              path = event.get("rawPath") or "/"
+              stage = (event.get("requestContext") or {}).get("stage")
+
+              if stage:
+                  if path == f"/{stage}":
+                      return "/"
+                  if path.startswith(f"/{stage}/"):
+                      return path[len(stage) + 1:]  # remove "/{stage}" keep "/tasks"
+              return path
+
+          def safe_json(body):
+              if not body:
+                  return {}
+              try:
+                  return json.loads(body)
+              except json.JSONDecodeError:
+                  return None
+
+          # --- Lambda Handler ---
+          def handler(event, context):
+              try:
+                  method = ((event.get("requestContext") or {}).get("http") or {}).get("method")
+                  path = normalize_path(event)
+                  params = event.get("pathParameters") or {}
+                  task_id = params.get("id")
+
+                  # Debug (visible in CloudWatch logs)
+                  print("DEBUG method:", method, "path:", path, "task_id:", task_id)
+
+                  # CORS preflight
+                  if method == "OPTIONS":
+                      return resp(200, {"ok": True})
+
+                  # Health
+                  if method == "GET" and path == "/health":
+                      return resp(200, {"ok": True, "app": "Planio", "table": TABLE_NAME})
+
+                  # GET /tasks
+                  if method == "GET" and path == "/tasks":
+                      res = table.scan()
+                      return resp(200, {"items": res.get("Items", [])})
+
+                  # POST /tasks
+                  if method == "POST" and path == "/tasks":
+                      payload = safe_json(event.get("body"))
+                      if payload is None:
+                          return resp(400, {"message": "Invalid JSON body"})
+
+                      title = payload.get("title")
+                      if not title:
+                          return resp(400, {"message": "title is required"})
+
+                      item = {
+                          "taskId": str(uuid.uuid4()),
+                          "title": title,
+                          "description": payload.get("description", ""),
+                          "status": payload.get("status", "OPEN"),
+                          "createdAt": datetime.now(timezone.utc).isoformat()
+                      }
+                      table.put_item(Item=item)
+                      return resp(201, item)
+
+                  # GET /tasks/{id}
+                  if method == "GET" and path.startswith("/tasks/") and task_id:
+                      res = table.get_item(Key={"taskId": task_id})
+                      item = res.get("Item")
+                      if not item:
+                          return resp(404, {"message": "Not found"})
+                      return resp(200, item)
+
+                  # PUT /tasks/{id}
+                  if method == "PUT" and path.startswith("/tasks/") and task_id:
+                      payload = safe_json(event.get("body"))
+                      if payload is None:
+                          return resp(400, {"message": "Invalid JSON body"})
+
+                      updates = []
+                      values = {}
+                      names = {}
+
+                      if "title" in payload:
+                          updates.append("#t = :t")
+                          names["#t"] = "title"
+                          values[":t"] = payload["title"]
+
+                      if "description" in payload:
+                          updates.append("#d = :d")
+                          names["#d"] = "description"
+                          values[":d"] = payload["description"]
+
+                      if "status" in payload:
+                          updates.append("#s = :s")
+                          names["#s"] = "status"
+                          values[":s"] = payload["status"]
+
+                      if not updates:
+                          return resp(400, {"message": "No fields to update"})
+
+                      res = table.update_item(
+                          Key={"taskId": task_id},
+                          UpdateExpression="SET " + ", ".join(updates),
+                          ExpressionAttributeNames=names,
+                          ExpressionAttributeValues=values,
+                          ReturnValues="ALL_NEW"
+                      )
+                      return resp(200, res.get("Attributes"))
+
+                  # DELETE /tasks/{id}
+                  if method == "DELETE" and path.startswith("/tasks/") and task_id:
+                      table.delete_item(Key={"taskId": task_id})
+                      return {
+                          "statusCode": 204,
+                          "headers": {"Access-Control-Allow-Origin": "*"},
+                          "body": ""
+                      }
+
+                  # No route matched
+                  return resp(404, {"message": "Route not found", "method": method, "path": path})
+
+              except ClientError as ce:
+                  # AWS service errors (DynamoDB, permissions, etc.)
+                  print("AWS ClientError:", ce)
+                  return resp(500, {"message": "AWS Error", "error": str(ce)})
+
+              except Exception as e:
+                  # Any other runtime error
+                  print("Unhandled error:", str(e))
+                  return resp(500, {"message": "Internal Server Error", "error": str(e)})
+
+  # 4) API Gateway HTTP API
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "${AppName}Api-${AWS::StackName}"
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+        AllowHeaders: ["*"]
+
+  # 5) API -> Lambda integration
+  ApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt PlanioFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  # 6) Routes
+  RouteGetTasks:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /tasks"
+      Target: !Sub "integrations/${ApiIntegration}"
+
+  RoutePostTasks:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /tasks"
+      Target: !Sub "integrations/${ApiIntegration}"
+
+  RouteGetTask:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /tasks/{id}"
+      Target: !Sub "integrations/${ApiIntegration}"
+
+  RoutePutTask:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "PUT /tasks/{id}"
+      Target: !Sub "integrations/${ApiIntegration}"
+
+  RouteDeleteTask:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "DELETE /tasks/{id}"
+      Target: !Sub "integrations/${ApiIntegration}"
+
+  RouteHealth:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /health"
+      Target: !Sub "integrations/${ApiIntegration}"
+
+  # 7) Stage (auto deploy)
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: !Ref StageName
+      AutoDeploy: true
+
+  # 8) Permission for API Gateway to invoke Lambda
+  LambdaPermissionForApi:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PlanioFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*"
+
+
+Outputs:
+  ApiBaseUrl:
+    Description: Base URL for Planio API
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+  DynamoTableName:
+    Description: DynamoDB Table Name
+    Value: !Ref TableName
+  LambdaName:
+    Description: Lambda Function Name
+    Value: !Ref PlanioFunction
