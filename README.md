@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 
 # Planio — Serverless Task Management Platform on AWS
 
@@ -102,12 +101,7 @@ Base URL:
    `https://k0yn5up6s8.execute-api.eu-north-1.amazonaws.com/prod`
 3. Create tasks and refresh to view updates.
 
-
+ 
 
 ## Architecture Diagram
 ![Planio Architecture](architecture/planio-architecture.png)
-=======
-# planio-serverless-task-platform
-
-
->>>>>>> 41a251be0d16d765156c5ef90cfa18a902d66738
