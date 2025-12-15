@@ -1,9 +1,4 @@
 
-# Planio — Serverless Task Management Platform on AWS
-
-Planio is a fully serverless task management application built on AWS.
-The platform allows users to create, view, update, and delete tasks using
-a RESTful API with a modern, scalable, and cost-efficient architecture.
 
 # Planio — Serverless Task Management Platform on AWS
 
