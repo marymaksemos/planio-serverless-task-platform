@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 
 # Planio — Serverless Task Management Platform on AWS
 
@@ -105,3 +106,8 @@ Base URL:
 
 ## Architecture Diagram
 ![Planio Architecture](architecture/planio-architecture.png)
+=======
+# planio-serverless-task-platform
+
+
+>>>>>>> 41a251be0d16d765156c5ef90cfa18a902d66738
