@@ -60,7 +60,7 @@ Planio uses an event-driven serverless architecture:
 
 ## AWS Services Used
 - Amazon API Gateway (HTTP API)
-- AWS Lambda (Node.js 20)
+- AWS Lambda (python)
 - Amazon DynamoDB (On-Demand)
 - Amazon S3 (Static Website Hosting)
 - AWS IAM (Least Privilege)
